@@ -32,6 +32,9 @@
   .day button { display:block; width:100%; margin-top:4px; padding:10px 0; background:#334155; color:var(--fg); font-size:14px; }
   .day button.done { background:var(--accent); color:#052e16; }
   .day button.today { outline:2px solid var(--fg); outline-offset:1px; }
+  .notice { background:#7c2d12; color:#ffedd5; border-radius:10px; padding:10px 12px; margin-bottom:12px; font-size:.85rem; }
+  .backup { display:flex; gap:8px; margin-top:24px; }
+  .backup button { flex:1; background:#334155; color:var(--fg); }
   .empty { color:var(--muted); text-align:center; margin-top:32px; }
 </style>
 </head>
@@ -42,17 +45,92 @@
     <input id="name" type="text" placeholder="Neue Gewohnheit…" maxlength="60" autocomplete="off" required>
     <button type="submit">Hinzufügen</button>
   </form>
+  <div id="notice" class="notice" hidden></div>
   <div id="list"></div>
+  <div class="backup">
+    <button id="export" type="button">Backup exportieren</button>
+    <button id="import" type="button">Backup importieren</button>
+    <input id="file" type="file" accept="application/json,.json" hidden>
+  </div>
 </main>
 <script>
 const KEY = 'habits-v1';
+
+// localStorage kann in iOS Private Mode / bei blockierten Daten werfen -> Speicher-Fallback im RAM.
+const store = (() => {
+  const mem = {};
+  let persistent = true;
+  try {
+    const t = '__probe__';
+    localStorage.setItem(t, '1'); localStorage.removeItem(t);
+  } catch (e) { persistent = false; }
+  return {
+    persistent: () => persistent,
+    get(k) {
+      if (persistent) { try { return localStorage.getItem(k); } catch (e) { persistent = false; } }
+      return k in mem ? mem[k] : null;
+    },
+    set(k, v) {
+      mem[k] = v;
+      if (persistent) { try { localStorage.setItem(k, v); return true; } catch (e) { persistent = false; } }
+      return false;
+    }
+  };
+})();
+
 let habits = load();
 
 function load() {
-  try { return JSON.parse(localStorage.getItem(KEY)) || []; } catch (e) { return []; }
+  try {
+    const data = JSON.parse(store.get(KEY));
+    return Array.isArray(data) ? data : [];
+  } catch (e) { return []; }
 }
 function save() {
-  localStorage.setItem(KEY, JSON.stringify(habits));
+  store.set(KEY, JSON.stringify(habits));
+  showNotice();
+}
+function showNotice() {
+  const n = document.getElementById('notice');
+  n.hidden = store.persistent();
+  n.textContent = 'Speichern ist nicht möglich (Privater Modus oder Speicher blockiert). Daten gehen beim Schließen verloren – bitte regelmäßig ein Backup exportieren.';
+}
+
+// Backup als JSON
+function validate(data) {
+  if (!Array.isArray(data)) throw new Error('Ungültiges Format');
+  return data.map(h => {
+    if (!h || typeof h.name !== 'string' || !h.name.trim()) throw new Error('Ungültiger Eintrag');
+    const days = {};
+    Object.keys(h.days && typeof h.days === 'object' ? h.days : {}).forEach(k => {
+      if (/^\d{4}-\d{2}-\d{2}$/.test(k) && h.days[k]) days[k] = true;
+    });
+    return { id: String(h.id || Date.now().toString(36) + Math.random().toString(36).slice(2, 6)), name: h.name.trim().slice(0, 60), days };
+  });
+}
+async function exportBackup() {
+  const json = JSON.stringify({ app: 'habit-tracker', version: 1, exported: new Date().toISOString(), habits }, null, 2);
+  const file = new File([json], 'habit-backup-' + iso(new Date()) + '.json', { type: 'application/json' });
+  try {
+    if (navigator.canShare && navigator.canShare({ files: [file] })) { await navigator.share({ files: [file] }); return; }
+  } catch (e) { if (e.name === 'AbortError') return; }
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(file); a.download = file.name;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+}
+function importBackup(file) {
+  const r = new FileReader();
+  r.onload = () => {
+    try {
+      const parsed = JSON.parse(r.result);
+      const list = validate(Array.isArray(parsed) ? parsed : parsed.habits);
+      if (!confirm(list.length + ' Gewohnheit(en) importieren? Aktuelle Daten werden ersetzt.')) return;
+      habits = list; save(); render();
+    } catch (e) { alert('Import fehlgeschlagen: ' + e.message); }
+  };
+  r.onerror = () => alert('Datei konnte nicht gelesen werden.');
+  r.readAsText(file);
 }
 
 function iso(d) {
@@ -117,6 +195,14 @@ document.getElementById('form').addEventListener('submit', e => {
   input.value = ''; save(); render();
 });
 
+document.getElementById('export').addEventListener('click', exportBackup);
+document.getElementById('import').addEventListener('click', () => document.getElementById('file').click());
+document.getElementById('file').addEventListener('change', e => {
+  const f = e.target.files[0]; e.target.value = '';
+  if (f) importBackup(f);
+});
+
+showNotice();
 render();
 
 if ('serviceWorker' in navigator) {
